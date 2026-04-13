@@ -2,8 +2,6 @@ name = "openai-gemini"
 main = "src/worker.mjs"
 compatibility_date = "2026-04-07"
 compatibility_flags = [ "nodejs_compat" ]
-{
-  "placement": {
-    "region": "aws:ap-southeast-1", 
-  },
-}
+
+[placement]
+region = "aws:ap-southeast-1"
