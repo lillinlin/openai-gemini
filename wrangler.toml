@@ -5,3 +5,4 @@ compatibility_flags = [ "nodejs_compat" ]
 
 [placement]
 region = "gcp:us-west-1"
+
