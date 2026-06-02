@@ -564,10 +564,6 @@ function transformCandidates (key, cand) {
         // 思考内容单独收集到 reasoning_content，不混入正文
         message.reasoning_content.push(part.text);
       } else {
-        const len = message.content.length;
-        if (len) {
-          message.content[len-1] += SEP;
-        }
         message.content.push(part.text);
       }
       if (thought_signature && part.thoughtSignature) {
