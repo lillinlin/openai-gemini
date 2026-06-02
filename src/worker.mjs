@@ -226,6 +226,26 @@ async function handleCompletions (req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
+// Fields not supported by Gemini's function calling schema
+const UNSUPPORTED_SCHEMA_FIELDS = [
+  "additionalProperties",
+  "patternProperties",
+  "unevaluatedProperties",
+  "propertyNames",
+  "minProperties",
+  "maxProperties",
+  "contentEncoding",
+  "contentMediaType",
+  "$schema",
+  "$id",
+  "$ref",
+  "$defs",
+  "definitions",
+  "if",
+  "then",
+  "else",
+  "not",
+];
 const adjustProps = (schemaPart) => {
   if (typeof schemaPart !== "object" || schemaPart === null) {
     return;
@@ -233,8 +253,8 @@ const adjustProps = (schemaPart) => {
   if (Array.isArray(schemaPart)) {
     schemaPart.forEach(adjustProps);
   } else {
-    if (schemaPart.type === "object" && schemaPart.properties && schemaPart.additionalProperties === false) {
-      delete schemaPart.additionalProperties;
+    for (const field of UNSUPPORTED_SCHEMA_FIELDS) {
+      delete schemaPart[field];
     }
     Object.values(schemaPart).forEach(adjustProps);
   }
