@@ -543,7 +543,7 @@ const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse
 };
 const SEP = "\n\n|>";
 function transformCandidates (key, cand) {
-  const message = { role: "assistant", content: [] };
+  const message = { role: "assistant", content: [], reasoning_content: [] };
   let thought_signature;
   for (const part of cand.content?.parts ?? []) {
     if (part.functionCall) {
@@ -560,25 +560,16 @@ function transformCandidates (key, cand) {
         extra_content: thought_signature ? {google: { thought_signature }} : undefined,
       });
     } else if (typeof part.text === "string") {
-      const len = message.content.length;
-      if (part.thought !== this.isThinking) {
-        this.isThinking = part.thought;
-        let prefix;
-        if (part.thought) {
-          prefix = "<thought>\n";
-        } else {
-          prefix = "</thought>\n\n";
-          if (len) {
-            message.content[len-1] = message.content[len-1].trimEnd() + "\n";
-          } else {
-            prefix += "\n";
-          }
+      if (part.thought) {
+        // 思考内容单独收集到 reasoning_content，不混入正文
+        message.reasoning_content.push(part.text);
+      } else {
+        const len = message.content.length;
+        if (len) {
+          message.content[len-1] += SEP;
         }
-        part.text = prefix + part.text;
-      } else if (len) {
-        message.content[len-1] += SEP;
+        message.content.push(part.text);
       }
-      message.content.push(part.text);
       if (thought_signature && part.thoughtSignature) {
         throw new Error("Unexpected multiple thoughtSignature");
       }
@@ -587,7 +578,11 @@ function transformCandidates (key, cand) {
       throw new Error("Unexpected part type: " + JSON.stringify(part,2));
     }
   }
-  message.content = message.content.join("") ?? null;
+  message.content = message.content.join("") || null;
+  message.reasoning_content = message.reasoning_content.join("") || undefined;
+  if (message.reasoning_content === undefined) {
+    delete message.reasoning_content;
+  }
   if (thought_signature) {
     message.extra_content = {google: { thought_signature }};
   }
