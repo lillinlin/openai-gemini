@@ -393,16 +393,22 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   if (parts[i]) {
     throw new HttpError("Duplicated tool_call_id: " + tool_call_id, 400);
   }
+  const thoughtSignature = parts.calls[tool_call_id]?.thoughtSignature;
   parts[i] = {
     functionResponse: {
       id: tool_call_id.startsWith("call_") ? null : tool_call_id,
       name,
       response,
-    }
+    },
+    ...(thoughtSignature ? { thoughtSignature } : {}),
   };
 };
 
-const transformFnCalls = ({ tool_calls }) => {
+// Cache: tool_call_id -> thoughtSignature, populated when we see assistant tool_calls
+// so that the next tool-result turn can attach it even if the client doesn't forward extra_content.
+const thoughtSignatureCache = new Map();
+
+const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
   const calls = {};
   const parts = tool_calls.map(({ function: { arguments: argstr, name }, id, type, extra_content }, i) => {
     if (type !== "function") {
@@ -415,14 +421,19 @@ const transformFnCalls = ({ tool_calls }) => {
       console.error("Error parsing function arguments:", err);
       throw new HttpError("Invalid function arguments: " + argstr, 400);
     }
-    calls[id] = {i, name};
+    // Prefer client-forwarded extra_content, fall back to our cache
+    const thoughtSignature =
+      extra_content?.google?.thought_signature ??
+      cachedSignatures?.get(id) ??
+      undefined;
+    calls[id] = { i, name, thoughtSignature };
     return {
       functionCall: {
         id: id.startsWith("call_") ? null : id,
         name,
         args,
       },
-      thoughtSignature: extra_content?.google?.thought_signature,
+      thoughtSignature,
     };
   });
   parts.calls = calls;
@@ -505,10 +516,18 @@ const transformMessages = async (messages) => {
       default:
         throw new HttpError(`Unknown message role: "${item.role}"`, 400);
     }
-    contents.push({
-      role: item.role,
-      parts: item.tool_calls ? transformFnCalls(item) : await transformMsg(item)
-    });
+    if (item.tool_calls) {
+      // Build a per-request signature map from cache for this batch of tool_calls
+      const sigMap = new Map();
+      for (const tc of item.tool_calls) {
+        const cached = thoughtSignatureCache.get(tc.id);
+        if (cached) sigMap.set(tc.id, cached);
+      }
+      const fnParts = transformFnCalls(item, sigMap);
+      contents.push({ role: item.role, parts: fnParts });
+    } else {
+      contents.push({ role: item.role, parts: await transformMsg(item) });
+    }
   }
   if (system_instruction) {
     if (!contents[0]?.parts.some(part => part.text)) {
@@ -570,8 +589,14 @@ function transformCandidates (key, cand) {
       const fc = part.functionCall;
       message.tool_calls ??= [];
       const thought_signature = fc.thoughtSignature;
+      const tool_id = fc.id ?? "call_" + generateId();
+      // Cache thought_signature so the next tool-result turn can attach it
+      // even when the client doesn't forward extra_content
+      if (thought_signature) {
+        thoughtSignatureCache.set(tool_id, thought_signature);
+      }
       message.tool_calls.push({
-        id: fc.id ?? "call_" + generateId(),
+        id: tool_id,
         type: "function",
         function: {
           name: fc.name,
