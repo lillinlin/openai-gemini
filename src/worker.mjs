@@ -187,10 +187,9 @@ async function handleCompletions (req, apiKey) {
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-
   body = response.body;
   if (response.ok) {
-    let id = "chatcmpl-" + generateId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
+    let id = "chatcmpl-" + generateId();
     const shared = {};
     if (req.stream) {
       body = response.body
@@ -218,7 +217,7 @@ async function handleCompletions (req, apiKey) {
         }
       } catch (err) {
         console.error("Error parsing response:", err);
-        return new Response(body, fixCors(response)); // output as is
+        return new Response(body, fixCors(response));
       }
       body = processCompletionsResponse(body, model, id);
     }
@@ -246,6 +245,7 @@ const UNSUPPORTED_SCHEMA_FIELDS = [
   "else",
   "not",
 ];
+
 const adjustProps = (schemaPart) => {
   if (typeof schemaPart !== "object" || schemaPart === null) {
     return;
@@ -259,6 +259,7 @@ const adjustProps = (schemaPart) => {
     Object.values(schemaPart).forEach(adjustProps);
   }
 };
+
 const adjustSchema = (schema) => {
   const obj = schema[schema.type];
   delete obj.strict;
@@ -273,39 +274,41 @@ const harmCategory = [
   "HARM_CATEGORY_HARASSMENT",
   "HARM_CATEGORY_CIVIC_INTEGRITY",
 ];
+
 const safetySettings = harmCategory.map(category => ({
   category,
   threshold: "BLOCK_NONE",
 }));
+
 const fieldsMap = {
   frequency_penalty: "frequencyPenalty",
   max_completion_tokens: "maxOutputTokens",
   max_tokens: "maxOutputTokens",
-  n: "candidateCount", // not for streaming
+  n: "candidateCount",
   presence_penalty: "presencePenalty",
   seed: "seed",
   stop: "stopSequences",
   temperature: "temperature",
-  top_k: "topK", // non-standard
+  top_k: "topK",
   top_p: "topP",
 };
-//https://ai.google.dev/gemini-api/docs/openai#thinking
-//https://platform.openai.com/docs/api-reference/chat/create#chat_create-reasoning_effort
+
 const thinkingBudgetMap = {
   none: 0,
   minimal: 1024,
   low: 1024,
   medium: 8192,
   high: 24576,
-  xhigh: 32768, // 2.5 Pro
+  xhigh: 32768,
 };
+
 const thinkingLevelMap = {
   none: "minimal",
   xhigh: "high",
 };
+
 const transformConfig = (req, isV3) => {
   let cfg = {};
-  //if (typeof req.stop === "string") { req.stop = [req.stop]; } // no need
   for (let key in req) {
     const matchedKey = fieldsMap[key];
     if (matchedKey) {
@@ -377,7 +380,6 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   try {
     response = JSON.parse(content);
   } catch (err) {
-    // Tool returned plain text instead of JSON — wrap it
     response = { result: content };
   }
   if (typeof response !== "object" || response === null || Array.isArray(response)) {
@@ -393,19 +395,19 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   if (parts[i]) {
     throw new HttpError("Duplicated tool_call_id: " + tool_call_id, 400);
   }
-  const thoughtSignature = parts.calls[tool_call_id]?.thoughtSignature;
   parts[i] = {
     functionResponse: {
       id: tool_call_id.startsWith("call_") ? null : tool_call_id,
       name,
       response,
     },
-    ...(thoughtSignature ? { thoughtSignature } : {}),
   };
 };
 
 // Cache: tool_call_id -> thoughtSignature, populated when we see assistant tool_calls
 // so that the next tool-result turn can attach it even if the client doesn't forward extra_content.
+// Note: In Cloudflare Workers this Map is only a best-effort in-memory fallback.
+// The most reliable path is for the client to preserve tool_calls[].extra_content.google.thought_signature.
 const thoughtSignatureCache = new Map();
 
 const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
@@ -421,19 +423,21 @@ const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
       console.error("Error parsing function arguments:", err);
       throw new HttpError("Invalid function arguments: " + argstr, 400);
     }
-    // Prefer client-forwarded extra_content, fall back to our cache
+
     const thoughtSignature =
       extra_content?.google?.thought_signature ??
       cachedSignatures?.get(id) ??
       undefined;
+
     calls[id] = { i, name, thoughtSignature };
+
     return {
       functionCall: {
         id: id.startsWith("call_") ? null : id,
         name,
         args,
       },
-      thoughtSignature,
+      ...(thoughtSignature ? { thoughtSignature } : {}),
     };
   });
   parts.calls = calls;
@@ -444,15 +448,10 @@ const transformMsg = async ({ content, extra_content }) => {
   const thoughtSignature = extra_content?.google?.thought_signature;
   const parts = [];
   if (!Array.isArray(content)) {
-    // system, user: string
-    // assistant: string or null (Required unless tool_calls is specified.)
-    parts.push({ text: content, thoughtSignature });
+    parts.push({ text: content, ...(thoughtSignature ? { thoughtSignature } : {}) });
     return parts;
   }
-  // user:
-  // An array of content parts with a defined type.
-  // Supported options differ based on the model being used to generate the response.
-  // Can contain text, image, or audio inputs.
+
   for (const item of content) {
     switch (item.type) {
       case "text":
@@ -473,6 +472,7 @@ const transformMsg = async ({ content, extra_content }) => {
         throw new HttpError(`Unknown "content" item type: "${item.type}"`, 400);
     }
   }
+
   if (thoughtSignature) {
     if (parts.length === 1) {
       parts[0].thoughtSignature = thoughtSignature;
@@ -480,8 +480,9 @@ const transformMsg = async ({ content, extra_content }) => {
       parts.push({ text:"", thoughtSignature });
     }
   }
+
   if (content.every(item => item.type === "image_url")) {
-    parts.push({ text: "" }); // to avoid "Unable to submit request because it must have a text parameter"
+    parts.push({ text: "" });
   }
   return parts;
 };
@@ -490,6 +491,7 @@ const transformMessages = async (messages) => {
   if (!messages) { return; }
   const contents = [];
   let system_instruction;
+
   for (const item of messages) {
     switch (item.role) {
       case "system":
@@ -500,9 +502,10 @@ const transformMessages = async (messages) => {
         let { role, parts } = contents[contents.length - 1] ?? {};
         if (role !== "function") {
           const calls = parts?.calls;
-          parts = []; parts.calls = calls;
+          parts = [];
+          parts.calls = calls;
           contents.push({
-            role: "function", // ignored
+            role: "function",
             parts
           });
         }
@@ -516,8 +519,8 @@ const transformMessages = async (messages) => {
       default:
         throw new HttpError(`Unknown message role: "${item.role}"`, 400);
     }
+
     if (item.tool_calls) {
-      // Build a per-request signature map from cache for this batch of tool_calls
       const sigMap = new Map();
       for (const tc of item.tool_calls) {
         const cached = thoughtSignatureCache.get(tc.id);
@@ -529,12 +532,13 @@ const transformMessages = async (messages) => {
       contents.push({ role: item.role, parts: await transformMsg(item) });
     }
   }
+
   if (system_instruction) {
     if (!contents[0]?.parts.some(part => part.text)) {
-      contents.unshift({ role: "user", parts: { text: " " } });
+      contents.unshift({ role: "user", parts: [{ text: " " }] });
     }
   }
-  //console.info(JSON.stringify(contents, 2));
+
   return { system_instruction, contents };
 };
 
@@ -572,72 +576,86 @@ const generateId = () => {
   return Array.from({ length: 29 }, randomChar).join("");
 };
 
-const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse#finishreason
-  //"FINISH_REASON_UNSPECIFIED": // Default value. This value is unused.
+const reasonsMap = {
   "STOP": "stop",
   "MAX_TOKENS": "length",
   "SAFETY": "content_filter",
   "RECITATION": "content_filter",
-  //"OTHER": "OTHER",
 };
-const SEP = "\n\n|>";
+
 function transformCandidates (key, cand) {
   const message = { role: "assistant", content: [], reasoning_content: [] };
   let thought_signature;
+
   for (const part of cand.content?.parts ?? []) {
     if (part.functionCall) {
       const fc = part.functionCall;
       message.tool_calls ??= [];
-      const thought_signature = fc.thoughtSignature;
+
+      // Gemini returns thoughtSignature on the Part level:
+      // { functionCall: {...}, thoughtSignature: "..." }
+      // Keep fc.thoughtSignature as a compatibility fallback.
+      const fc_thought_signature = part.thoughtSignature ?? fc.thoughtSignature;
+
       const tool_id = fc.id ?? "call_" + generateId();
+
       // Cache thought_signature so the next tool-result turn can attach it
-      // even when the client doesn't forward extra_content
-      if (thought_signature) {
-        thoughtSignatureCache.set(tool_id, thought_signature);
+      // even when the client doesn't forward extra_content.
+      if (fc_thought_signature) {
+        thoughtSignatureCache.set(tool_id, fc_thought_signature);
       }
+
       message.tool_calls.push({
         id: tool_id,
         type: "function",
         function: {
           name: fc.name,
-          arguments: JSON.stringify(fc.args),
+          arguments: JSON.stringify(fc.args ?? {}),
         },
-        extra_content: thought_signature ? {google: { thought_signature }} : undefined,
+        extra_content: fc_thought_signature
+          ? { google: { thought_signature: fc_thought_signature } }
+          : undefined,
       });
     } else if (typeof part.text === "string") {
       if (part.thought) {
-        // 思考内容单独收集到 reasoning_content，不混入正文
         message.reasoning_content.push(part.text);
       } else {
         message.content.push(part.text);
       }
+
       if (thought_signature && part.thoughtSignature) {
         throw new Error("Unexpected multiple thoughtSignature");
       }
+
       thought_signature = part.thoughtSignature;
     } else {
-      throw new Error("Unexpected part type: " + JSON.stringify(part,2));
+      throw new Error("Unexpected part type: " + JSON.stringify(part, null, 2));
     }
   }
+
   message.content = message.content.join("") || null;
   message.reasoning_content = message.reasoning_content.join("") || undefined;
+
   if (message.reasoning_content === undefined) {
     delete message.reasoning_content;
   }
+
   if (thought_signature) {
-    message.extra_content = {google: { thought_signature }};
+    message.extra_content = { google: { thought_signature } };
   }
+
   return {
-    index: cand.index ?? 0, // 0-index is absent in new -002 models response
-    [key]: message,
+    index: cand.index ?? 0,
+    message,
     logprobs: null,
     finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] ?? cand.finishReason,
-    //original_finish_reason: cand.finishReason,
   };
 }
 
 const notEmpty = (el) => Object.values(el).some(Boolean) ? el : undefined;
+
 const sum = (...numbers) => numbers.reduce((total, num) => total + (num ?? 0), 0);
+
 const transformUsage = (data) => ({
   completion_tokens: sum(data.candidatesTokenCount, data.toolUsePromptTokenCount, data.thoughtsTokenCount),
   prompt_tokens: data.promptTokenCount,
@@ -668,9 +686,8 @@ const checkPromptBlock = (choices, promptFeedback, key) => {
     }
     choices.push({
       index: 0,
-      [key]: null,
+      null,
       finish_reason: "content_filter",
-      //original_finish_reason: data.promptFeedback.blockReason,
     });
   }
   return true;
@@ -682,7 +699,6 @@ const processCompletionsResponse = (data, model, id) => {
     choices: data.candidates.map(transformCandidates.bind({}, "message")),
     created: Math.floor(Date.now()/1000),
     model: data.modelVersion ?? model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion",
     usage: data.usageMetadata && transformUsage(data.usageMetadata),
   };
@@ -693,6 +709,7 @@ const processCompletionsResponse = (data, model, id) => {
 };
 
 const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
+
 function parseStream (chunk, controller) {
   this.buffer += chunk;
   do {
@@ -700,8 +717,9 @@ function parseStream (chunk, controller) {
     if (!match) { break; }
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
-  } while (true); // eslint-disable-line no-constant-condition
+  } while (true);
 }
+
 function parseStreamFlush (controller) {
   if (this.buffer) {
     console.error("Invalid data:", this.buffer);
@@ -711,10 +729,12 @@ function parseStreamFlush (controller) {
 }
 
 const delimiter = "\n\n";
+
 const sseline = (obj) => {
   obj.created = Math.floor(Date.now()/1000);
   return "data: " + JSON.stringify(obj) + delimiter;
 };
+
 function toOpenAiStream (line, controller) {
   let data;
   try {
@@ -724,18 +744,17 @@ function toOpenAiStream (line, controller) {
     }
   } catch (err) {
     console.error("Error parsing response:", err);
-    if (!this.shared.is_buffers_rest) { line =+ delimiter; }
-    controller.enqueue(line); // output as is
+    if (!this.shared.is_buffers_rest) { line += delimiter; }
+    controller.enqueue(line);
     return;
   }
+
   let obj;
   try {
     obj = {
       id: data.responseId ?? this.id,
       choices: data.candidates.map(transformCandidates.bind(this, "delta")),
-      //created: Math.floor(Date.now()/1000),
       model: data.modelVersion ?? this.model,
-      //system_fingerprint: "fp_69829325d0",
       object: "chat.completion.chunk",
       usage: data.usageMetadata && this.streamIncludeUsage ? null : undefined,
     };
@@ -746,32 +765,43 @@ function toOpenAiStream (line, controller) {
     controller.terminate();
     return;
   }
+
   if (checkPromptBlock(obj.choices, data.promptFeedback, "delta")) {
     controller.enqueue(sseline(obj));
     return;
   }
+
   console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
+
   const cand = obj.choices[0];
-  cand.index ??= 0; // absent in new -002 models response
+  cand.index ??= 0;
+
   const finish_reason = cand.finish_reason;
   cand.finish_reason = null;
-  if (!this.last[cand.index]) { // first
+
+  if (!this.last[cand.index]) {
     controller.enqueue(sseline({
       ...obj,
       choices: [{ ...cand, tool_calls: undefined, delta: { role: "assistant", content: "" } }],
     }));
   }
+
   delete cand.delta.role;
-  if ("content" in cand.delta) { // prevent empty data (e.g. when MAX_TOKENS)
+
+  if ("content" in cand.delta) {
     controller.enqueue(sseline(obj));
   }
+
   cand.finish_reason = finish_reason;
+
   if (data.usageMetadata && this.streamIncludeUsage) {
     obj.usage = transformUsage(data.usageMetadata);
   }
+
   cand.delta = {};
   this.last[cand.index] = obj;
 }
+
 function toOpenAiStreamFlush (controller) {
   if (this.last.length > 0) {
     for (const obj of this.last) {
