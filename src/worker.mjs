@@ -66,15 +66,16 @@ const handleOPTIONS = async () => {
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
-const API_CLIENT = "google-genai-sdk/1.34.0";
 
+// https://github.com/googleapis/js-genai/blob/main/src/_api_client.ts#L21
+const API_CLIENT = "google-genai-sdk/1.34.0"; // npm view @google/genai version
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
   ...(apiKey && { "x-goog-api-key": apiKey }),
   ...more
 });
 
-async function handleModels(apiKey) {
+async function handleModels (apiKey) {
   const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
@@ -95,7 +96,7 @@ async function handleModels(apiKey) {
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "gemini-embedding-001";
-async function handleEmbeddings(req, apiKey) {
+async function handleEmbeddings (req, apiKey) {
   let modelFull, model;
   switch (true) {
     case typeof req.model !== "string":
@@ -111,7 +112,9 @@ async function handleEmbeddings(req, apiKey) {
       model = DEFAULT_EMBEDDINGS_MODEL;
   }
   modelFull ??= "models/" + model;
-  if (!Array.isArray(req.input)) req.input = [req.input];
+  if (!Array.isArray(req.input)) {
+    req.input = [ req.input ];
+  }
   const response = await fetch(`${BASE_URL}/${API_VERSION}/${modelFull}:batchEmbedContents`, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
@@ -140,8 +143,7 @@ async function handleEmbeddings(req, apiKey) {
 }
 
 const DEFAULT_MODEL = "gemini-flash-latest";
-
-async function handleCompletions(req, apiKey) {
+async function handleCompletions (req, apiKey) {
   let model = req.model;
   switch (true) {
     case typeof model !== "string":
@@ -159,9 +161,15 @@ async function handleCompletions(req, apiKey) {
   let body = await transformRequest(req, isV3);
   const extra = req.extra_body?.google;
   if (extra) {
-    if (extra.safety_settings) body.safetySettings = extra.safety_settings;
-    if (extra.cached_content) body.cachedContent = extra.cached_content;
-    if (extra.thinking_config) body.generationConfig.thinkingConfig = extra.thinking_config;
+    if (extra.safety_settings) {
+      body.safetySettings = extra.safety_settings;
+    }
+    if (extra.cached_content) {
+      body.cachedContent = extra.cached_content;
+    }
+    if (extra.thinking_config) {
+      body.generationConfig.thinkingConfig = extra.thinking_config;
+    }
   }
   switch (true) {
     case model.endsWith(":search"):
@@ -169,11 +177,11 @@ async function handleCompletions(req, apiKey) {
       // eslint-disable-next-line no-fallthrough
     case req.model?.includes("-search-preview"):
       body.tools ??= [];
-      body.tools.push({google_search: {}});
+      body.tools.push({googleSearch: {}});
   }
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
-  if (req.stream) url += "?alt=sse";
+  if (req.stream) { url += "?alt=sse"; }
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
@@ -182,7 +190,7 @@ async function handleCompletions(req, apiKey) {
 
   body = response.body;
   if (response.ok) {
-    let id = "chatcmpl-" + generateId();
+    let id = "chatcmpl-" + generateId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
     const shared = {};
     if (req.stream) {
       body = response.body
@@ -205,10 +213,12 @@ async function handleCompletions(req, apiKey) {
       body = await response.text();
       try {
         body = JSON.parse(body);
-        if (!body.candidates) throw new Error("Invalid completion object");
+        if (!body.candidates) {
+          throw new Error("Invalid completion object");
+        }
       } catch (err) {
         console.error("Error parsing response:", err);
-        return new Response(body, fixCors(response));
+        return new Response(body, fixCors(response)); // output as is
       }
       body = processCompletionsResponse(body, model, id);
     }
@@ -216,58 +226,330 @@ async function handleCompletions(req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
-// ------------------ 修复 Thought Signature 核心 ------------------
+const adjustProps = (schemaPart) => {
+  if (typeof schemaPart !== "object" || schemaPart === null) {
+    return;
+  }
+  if (Array.isArray(schemaPart)) {
+    schemaPart.forEach(adjustProps);
+  } else {
+    if (schemaPart.type === "object" && schemaPart.properties && schemaPart.additionalProperties === false) {
+      delete schemaPart.additionalProperties;
+    }
+    Object.values(schemaPart).forEach(adjustProps);
+  }
+};
+const adjustSchema = (schema) => {
+  const obj = schema[schema.type];
+  delete obj.strict;
+  delete obj.parameters?.$schema;
+  return adjustProps(schema);
+};
+
+const harmCategory = [
+  "HARM_CATEGORY_HATE_SPEECH",
+  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+  "HARM_CATEGORY_DANGEROUS_CONTENT",
+  "HARM_CATEGORY_HARASSMENT",
+  "HARM_CATEGORY_CIVIC_INTEGRITY",
+];
+const safetySettings = harmCategory.map(category => ({
+  category,
+  threshold: "BLOCK_NONE",
+}));
+const fieldsMap = {
+  frequency_penalty: "frequencyPenalty",
+  max_completion_tokens: "maxOutputTokens",
+  max_tokens: "maxOutputTokens",
+  n: "candidateCount", // not for streaming
+  presence_penalty: "presencePenalty",
+  seed: "seed",
+  stop: "stopSequences",
+  temperature: "temperature",
+  top_k: "topK", // non-standard
+  top_p: "topP",
+};
+//https://ai.google.dev/gemini-api/docs/openai#thinking
+//https://platform.openai.com/docs/api-reference/chat/create#chat_create-reasoning_effort
+const thinkingBudgetMap = {
+  none: 0,
+  minimal: 1024,
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+  xhigh: 32768, // 2.5 Pro
+};
+const thinkingLevelMap = {
+  none: "minimal",
+  xhigh: "high",
+};
+const transformConfig = (req, isV3) => {
+  let cfg = {};
+  //if (typeof req.stop === "string") { req.stop = [req.stop]; } // no need
+  for (let key in req) {
+    const matchedKey = fieldsMap[key];
+    if (matchedKey) {
+      cfg[matchedKey] = req[key];
+    }
+  }
+  if (req.response_format) {
+    switch (req.response_format.type) {
+      case "json_schema":
+        adjustSchema(req.response_format);
+        cfg.responseSchema = req.response_format.json_schema?.schema;
+        if (cfg.responseSchema && "enum" in cfg.responseSchema) {
+          cfg.responseMimeType = "text/x.enum";
+          break;
+        }
+        // eslint-disable-next-line no-fallthrough
+      case "json_object":
+        cfg.responseMimeType = "application/json";
+        break;
+      case "text":
+        cfg.responseMimeType = "text/plain";
+        break;
+      default:
+        throw new HttpError("Unsupported response_format.type", 400);
+    }
+  }
+  if (req.reasoning_effort) {
+    cfg.thinkingConfig =
+      isV3
+        ? { thinkingLevel: thinkingLevelMap[req.reasoning_effort] ?? req.reasoning_effort }
+        : { thinkingBudget: thinkingBudgetMap[req.reasoning_effort] };
+  }
+  return cfg;
+};
+
+const parseImg = async (url) => {
+  let mimeType, data;
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText} (${url})`);
+      }
+      mimeType = response.headers.get("content-type");
+      data = Buffer.from(await response.arrayBuffer()).toString("base64");
+    } catch (err) {
+      throw new Error("Error fetching image: " + err.toString());
+    }
+  } else {
+    const match = url.match(/^data:(?<mimeType>.*?)(;base64)?,(?<data>.*)$/);
+    if (!match) {
+      throw new HttpError("Invalid image data: " + url, 400);
+    }
+    ({ mimeType, data } = match.groups);
+  }
+  return {
+    inlineData: {
+      mimeType,
+      data,
+    },
+  };
+};
+
+const transformFnResponse = ({ content, tool_call_id }, parts) => {
+  if (!parts.calls) {
+    throw new HttpError("No function calls found in the previous message", 400);
+  }
+  let response;
+  try {
+    response = JSON.parse(content);
+  } catch (err) {
+    console.error("Error parsing function response content:", err);
+    throw new HttpError("Invalid function response: " + content, 400);
+  }
+  if (typeof response !== "object" || response === null || Array.isArray(response)) {
+    response = { result: response };
+  }
+  if (!tool_call_id) {
+    throw new HttpError("tool_call_id not specified", 400);
+  }
+  const { i, name } = parts.calls[tool_call_id] ?? {};
+  if (!name) {
+    throw new HttpError("Unknown tool_call_id: " + tool_call_id, 400);
+  }
+  if (parts[i]) {
+    throw new HttpError("Duplicated tool_call_id: " + tool_call_id, 400);
+  }
+  parts[i] = {
+    functionResponse: {
+      id: tool_call_id.startsWith("call_") ? null : tool_call_id,
+      name,
+      response,
+    }
+  };
+};
 
 const transformFnCalls = ({ tool_calls }) => {
   const calls = {};
   const parts = tool_calls.map(({ function: { arguments: argstr, name }, id, type, extra_content }, i) => {
-    if (type !== "function") throw new HttpError(`Unsupported tool_call type: "${type}"`, 400);
+    if (type !== "function") {
+      throw new HttpError(`Unsupported tool_call type: "${type}"`, 400);
+    }
     let args;
-    try { args = JSON.parse(argstr); } catch { throw new HttpError("Invalid function arguments: " + argstr, 400); }
-    calls[id] = {
-      i,
-      name,
-      thoughtSignature: extra_content?.google?.thought_signature
-    };
+    try {
+      args = JSON.parse(argstr);
+    } catch (err) {
+      console.error("Error parsing function arguments:", err);
+      throw new HttpError("Invalid function arguments: " + argstr, 400);
+    }
+    calls[id] = {i, name};
     return {
       functionCall: {
         id: id.startsWith("call_") ? null : id,
         name,
         args,
-        thoughtSignature: extra_content?.google?.thought_signature
-      }
+      },
+      thoughtSignature: extra_content?.google?.thought_signature,
     };
   });
   parts.calls = calls;
   return parts;
 };
 
-const transformFnResponse = ({ content, tool_call_id }, parts) => {
-  if (!parts.calls) throw new HttpError("No function calls found in the previous message", 400);
-  let response;
-  try { response = JSON.parse(content); } catch { response = { result: content }; }
-  if (!tool_call_id) throw new HttpError("tool_call_id not specified", 400);
-  const { i, name, thoughtSignature } = parts.calls[tool_call_id] ?? {};
-  if (!name) throw new HttpError("Unknown tool_call_id: " + tool_call_id, 400);
-  if (parts[i]) throw new HttpError("Duplicated tool_call_id: " + tool_call_id, 400);
-  parts[i] = {
-    functionResponse: {
-      id: tool_call_id.startsWith("call_") ? null : tool_call_id,
-      name,
-      response,
-    },
-    thoughtSignature
-  };
+const transformMsg = async ({ content, extra_content }) => {
+  const thoughtSignature = extra_content?.google?.thought_signature;
+  const parts = [];
+  if (!Array.isArray(content)) {
+    // system, user: string
+    // assistant: string or null (Required unless tool_calls is specified.)
+    parts.push({ text: content, thoughtSignature });
+    return parts;
+  }
+  // user:
+  // An array of content parts with a defined type.
+  // Supported options differ based on the model being used to generate the response.
+  // Can contain text, image, or audio inputs.
+  for (const item of content) {
+    switch (item.type) {
+      case "text":
+        parts.push({ text: item.text });
+        break;
+      case "image_url":
+        parts.push(await parseImg(item.image_url.url));
+        break;
+      case "input_audio":
+        parts.push({
+          inlineData: {
+            mimeType: "audio/" + item.input_audio.format,
+            data: item.input_audio.data,
+          }
+        });
+        break;
+      default:
+        throw new HttpError(`Unknown "content" item type: "${item.type}"`, 400);
+    }
+  }
+  if (thoughtSignature) {
+    if (parts.length === 1) {
+      parts[0].thoughtSignature = thoughtSignature;
+    } else {
+      parts.push({ text:"", thoughtSignature });
+    }
+  }
+  if (content.every(item => item.type === "image_url")) {
+    parts.push({ text: "" }); // to avoid "Unable to submit request because it must have a text parameter"
+  }
+  return parts;
 };
 
-const transformCandidates = (key, cand) => {
+const transformMessages = async (messages) => {
+  if (!messages) { return; }
+  const contents = [];
+  let system_instruction;
+  for (const item of messages) {
+    switch (item.role) {
+      case "system":
+        system_instruction = { parts: await transformMsg(item) };
+        continue;
+      case "tool":
+        // eslint-disable-next-line no-case-declarations
+        let { role, parts } = contents[contents.length - 1] ?? {};
+        if (role !== "function") {
+          const calls = parts?.calls;
+          parts = []; parts.calls = calls;
+          contents.push({
+            role: "function", // ignored
+            parts
+          });
+        }
+        transformFnResponse(item, parts);
+        continue;
+      case "assistant":
+        item.role = "model";
+        break;
+      case "user":
+        break;
+      default:
+        throw new HttpError(`Unknown message role: "${item.role}"`, 400);
+    }
+    contents.push({
+      role: item.role,
+      parts: item.tool_calls ? transformFnCalls(item) : await transformMsg(item)
+    });
+  }
+  if (system_instruction) {
+    if (!contents[0]?.parts.some(part => part.text)) {
+      contents.unshift({ role: "user", parts: { text: " " } });
+    }
+  }
+  //console.info(JSON.stringify(contents, 2));
+  return { system_instruction, contents };
+};
+
+const transformTools = (req) => {
+  let tools, tool_config;
+  if (req.tools) {
+    const funcs = req.tools.filter(tool => tool.type === "function");
+    funcs.forEach(adjustSchema);
+    tools = [{ function_declarations: funcs.map(schema => schema.function) }];
+  }
+  if (req.tool_choice) {
+    const allowed_function_names = req.tool_choice?.type === "function" ? [ req.tool_choice?.function?.name ] : undefined;
+    if (allowed_function_names || typeof req.tool_choice === "string") {
+      tool_config = {
+        function_calling_config: {
+          mode: allowed_function_names ? "ANY" : req.tool_choice.toUpperCase(),
+          allowed_function_names
+        }
+      };
+    }
+  }
+  return { tools, tool_config };
+};
+
+const transformRequest = async (req, isV3) => ({
+  ...await transformMessages(req.messages),
+  safetySettings,
+  generationConfig: transformConfig(req,isV3),
+  ...transformTools(req),
+});
+
+const generateId = () => {
+  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const randomChar = () => characters[Math.floor(Math.random() * characters.length)];
+  return Array.from({ length: 29 }, randomChar).join("");
+};
+
+const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse#finishreason
+  //"FINISH_REASON_UNSPECIFIED": // Default value. This value is unused.
+  "STOP": "stop",
+  "MAX_TOKENS": "length",
+  "SAFETY": "content_filter",
+  "RECITATION": "content_filter",
+  //"OTHER": "OTHER",
+};
+const SEP = "\n\n|>";
+function transformCandidates (key, cand) {
   const message = { role: "assistant", content: [] };
   let thought_signature;
   for (const part of cand.content?.parts ?? []) {
     if (part.functionCall) {
       const fc = part.functionCall;
       message.tool_calls ??= [];
-      const t_sig = part.thoughtSignature ?? fc.thoughtSignature;
+      const thought_signature = fc.thoughtSignature;
       message.tool_calls.push({
         id: fc.id ?? "call_" + generateId(),
         type: "function",
@@ -275,27 +557,190 @@ const transformCandidates = (key, cand) => {
           name: fc.name,
           arguments: JSON.stringify(fc.args),
         },
-        extra_content: t_sig ? { google: { thought_signature: t_sig } } : undefined
+        extra_content: thought_signature ? {google: { thought_signature }} : undefined,
       });
-      thought_signature = t_sig ?? thought_signature;
     } else if (typeof part.text === "string") {
+      const len = message.content.length;
+      if (part.thought !== this.isThinking) {
+        this.isThinking = part.thought;
+        let prefix;
+        if (part.thought) {
+          prefix = "<thought>\n";
+        } else {
+          prefix = "</thought>\n\n";
+          if (len) {
+            message.content[len-1] = message.content[len-1].trimEnd() + "\n";
+          } else {
+            prefix += "\n";
+          }
+        }
+        part.text = prefix + part.text;
+      } else if (len) {
+        message.content[len-1] += SEP;
+      }
       message.content.push(part.text);
-      if (part.thoughtSignature) thought_signature = part.thoughtSignature;
+      if (thought_signature && part.thoughtSignature) {
+        throw new Error("Unexpected multiple thoughtSignature");
+      }
+      thought_signature = part.thoughtSignature;
+    } else {
+      throw new Error("Unexpected part type: " + JSON.stringify(part,2));
     }
   }
   message.content = message.content.join("") ?? null;
-  if (thought_signature) message.extra_content = { google: { thought_signature } };
+  if (thought_signature) {
+    message.extra_content = {google: { thought_signature }};
+  }
   return {
-    index: cand.index ?? 0,
+    index: cand.index ?? 0, // 0-index is absent in new -002 models response
     [key]: message,
     logprobs: null,
-    finish_reason: message.tool_calls ? "tool_calls" : cand.finishReason
+    finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] ?? cand.finishReason,
+    //original_finish_reason: cand.finishReason,
   };
+}
+
+const notEmpty = (el) => Object.values(el).some(Boolean) ? el : undefined;
+const sum = (...numbers) => numbers.reduce((total, num) => total + (num ?? 0), 0);
+const transformUsage = (data) => ({
+  completion_tokens: sum(data.candidatesTokenCount, data.toolUsePromptTokenCount, data.thoughtsTokenCount),
+  prompt_tokens: data.promptTokenCount,
+  total_tokens: data.totalTokenCount,
+  completion_tokens_details: notEmpty({
+    audio_tokens: data.candidatesTokensDetails
+      ?.find(el => el.modality === "AUDIO")
+      ?.tokenCount,
+    reasoning_tokens: data.thoughtsTokenCount,
+  }),
+  prompt_tokens_details: notEmpty({
+    audio_tokens: data.promptTokensDetails
+      ?.find(el => el.modality === "AUDIO")
+      ?.tokenCount,
+    cached_tokens: data.cacheTokensDetails
+      ?.reduce((acc,el) => acc + el.tokenCount, 0),
+  }),
+});
+
+const checkPromptBlock = (choices, promptFeedback, key) => {
+  if (choices.length) { return; }
+  if (promptFeedback?.blockReason) {
+    console.log("Prompt block reason:", promptFeedback.blockReason);
+    if (promptFeedback.blockReason === "SAFETY") {
+      promptFeedback.safetyRatings
+        .filter(r => r.blocked)
+        .forEach(r => console.log(r));
+    }
+    choices.push({
+      index: 0,
+      [key]: null,
+      finish_reason: "content_filter",
+      //original_finish_reason: data.promptFeedback.blockReason,
+    });
+  }
+  return true;
 };
 
-// ------------------ 其他函数保持原样 ------------------
-
-const generateId = () => {
-  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from({ length: 29 }, () => characters[Math.floor(Math.random() * characters.length)]).join("");
+const processCompletionsResponse = (data, model, id) => {
+  const obj = {
+    id: data.responseId ?? id,
+    choices: data.candidates.map(transformCandidates.bind({}, "message")),
+    created: Math.floor(Date.now()/1000),
+    model: data.modelVersion ?? model,
+    //system_fingerprint: "fp_69829325d0",
+    object: "chat.completion",
+    usage: data.usageMetadata && transformUsage(data.usageMetadata),
+  };
+  if (obj.choices.length === 0 ) {
+    checkPromptBlock(obj.choices, data.promptFeedback, "message");
+  }
+  return JSON.stringify(obj);
 };
+
+const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
+function parseStream (chunk, controller) {
+  this.buffer += chunk;
+  do {
+    const match = this.buffer.match(responseLineRE);
+    if (!match) { break; }
+    controller.enqueue(match[1]);
+    this.buffer = this.buffer.substring(match[0].length);
+  } while (true); // eslint-disable-line no-constant-condition
+}
+function parseStreamFlush (controller) {
+  if (this.buffer) {
+    console.error("Invalid data:", this.buffer);
+    controller.enqueue(this.buffer);
+    this.shared.is_buffers_rest = true;
+  }
+}
+
+const delimiter = "\n\n";
+const sseline = (obj) => {
+  obj.created = Math.floor(Date.now()/1000);
+  return "data: " + JSON.stringify(obj) + delimiter;
+};
+function toOpenAiStream (line, controller) {
+  let data;
+  try {
+    data = JSON.parse(line);
+    if (!data.candidates) {
+      throw new Error("Invalid completion chunk object");
+    }
+  } catch (err) {
+    console.error("Error parsing response:", err);
+    if (!this.shared.is_buffers_rest) { line =+ delimiter; }
+    controller.enqueue(line); // output as is
+    return;
+  }
+  let obj;
+  try {
+    obj = {
+      id: data.responseId ?? this.id,
+      choices: data.candidates.map(transformCandidates.bind(this, "delta")),
+      //created: Math.floor(Date.now()/1000),
+      model: data.modelVersion ?? this.model,
+      //system_fingerprint: "fp_69829325d0",
+      object: "chat.completion.chunk",
+      usage: data.usageMetadata && this.streamIncludeUsage ? null : undefined,
+    };
+  } catch (err) {
+    console.error(err);
+    controller.enqueue("Unexpected error while handling request: " + err.message);
+    controller.enqueue("\n\n" + line);
+    controller.terminate();
+    return;
+  }
+  if (checkPromptBlock(obj.choices, data.promptFeedback, "delta")) {
+    controller.enqueue(sseline(obj));
+    return;
+  }
+  console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
+  const cand = obj.choices[0];
+  cand.index ??= 0; // absent in new -002 models response
+  const finish_reason = cand.finish_reason;
+  cand.finish_reason = null;
+  if (!this.last[cand.index]) { // first
+    controller.enqueue(sseline({
+      ...obj,
+      choices: [{ ...cand, tool_calls: undefined, delta: { role: "assistant", content: "" } }],
+    }));
+  }
+  delete cand.delta.role;
+  if ("content" in cand.delta) { // prevent empty data (e.g. when MAX_TOKENS)
+    controller.enqueue(sseline(obj));
+  }
+  cand.finish_reason = finish_reason;
+  if (data.usageMetadata && this.streamIncludeUsage) {
+    obj.usage = transformUsage(data.usageMetadata);
+  }
+  cand.delta = {};
+  this.last[cand.index] = obj;
+}
+function toOpenAiStreamFlush (controller) {
+  if (this.last.length > 0) {
+    for (const obj of this.last) {
+      controller.enqueue(sseline(obj));
+    }
+    controller.enqueue("data: [DONE]" + delimiter);
+  }
+}
