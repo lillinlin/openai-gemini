@@ -2,7 +2,9 @@ import { Buffer } from "node:buffer";
 
 export default {
   async fetch(request) {
-    if (request.method === "OPTIONS") return handleOPTIONS();
+    if (request.method === "OPTIONS") {
+      return handleOPTIONS();
+    }
 
     const errHandler = (err) => {
       console.error(err);
@@ -12,13 +14,17 @@ export default {
     try {
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
-      const { pathname } = new URL(request.url);
 
       const assert = (success) => {
         if (!success) {
-          throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
+          throw new HttpError(
+            "The specified HTTP method is not allowed for the requested resource",
+            400
+          );
         }
       };
+
+      const { pathname } = new URL(request.url);
 
       switch (true) {
         case pathname.endsWith("/chat/completions"):
@@ -85,6 +91,7 @@ async function handleModels(apiKey) {
 
   if (response.ok) {
     const { models } = JSON.parse(await response.text());
+
     body = JSON.stringify({
       object: "list",
       data: models.map(({ name }) => ({
@@ -128,22 +135,26 @@ async function handleEmbeddings(req, apiKey) {
     req.input = [req.input];
   }
 
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/${modelFull}:batchEmbedContents`, {
-    method: "POST",
-    headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      requests: req.input.map(text => ({
-        model: modelFull,
-        content: { parts: { text } },
-        outputDimensionality: req.dimensions,
-      }))
-    })
-  });
+  const response = await fetch(
+    `${BASE_URL}/${API_VERSION}/${modelFull}:batchEmbedContents`,
+    {
+      method: "POST",
+      headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        requests: req.input.map(text => ({
+          model: modelFull,
+          content: { parts: { text } },
+          outputDimensionality: req.dimensions,
+        }))
+      })
+    }
+  );
 
   let { body } = response;
 
   if (response.ok) {
     const { embeddings } = JSON.parse(await response.text());
+
     body = JSON.stringify({
       object: "list",
       data: embeddings.map(({ values }, index) => ({
@@ -183,10 +194,19 @@ async function handleCompletions(req, apiKey) {
   let body = await transformRequest(req, isV3);
 
   const extra = req.extra_body?.google;
+
   if (extra) {
-    if (extra.safety_settings) body.safetySettings = extra.safety_settings;
-    if (extra.cached_content) body.cachedContent = extra.cached_content;
-    if (extra.thinking_config) body.generationConfig.thinkingConfig = extra.thinking_config;
+    if (extra.safety_settings) {
+      body.safetySettings = extra.safety_settings;
+    }
+
+    if (extra.cached_content) {
+      body.cachedContent = extra.cached_content;
+    }
+
+    if (extra.thinking_config) {
+      body.generationConfig.thinkingConfig = extra.thinking_config;
+    }
   }
 
   switch (true) {
@@ -204,7 +224,10 @@ async function handleCompletions(req, apiKey) {
 
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
-  if (req.stream) url += "?alt=sse";
+
+  if (req.stream) {
+    url += "?alt=sse";
+  }
 
   const response = await fetch(url, {
     method: "POST",
@@ -242,7 +265,10 @@ async function handleCompletions(req, apiKey) {
 
       try {
         body = JSON.parse(body);
-        if (!body.candidates) throw new Error("Invalid completion object");
+
+        if (!body.candidates) {
+          throw new Error("Invalid completion object");
+        }
       } catch (err) {
         console.error("Error parsing response:", err);
         return new Response(body, fixCors(response));
@@ -276,7 +302,9 @@ const UNSUPPORTED_SCHEMA_FIELDS = [
 ];
 
 const adjustProps = (schemaPart) => {
-  if (typeof schemaPart !== "object" || schemaPart === null) return;
+  if (typeof schemaPart !== "object" || schemaPart === null) {
+    return;
+  }
 
   if (Array.isArray(schemaPart)) {
     schemaPart.forEach(adjustProps);
@@ -284,16 +312,19 @@ const adjustProps = (schemaPart) => {
     for (const field of UNSUPPORTED_SCHEMA_FIELDS) {
       delete schemaPart[field];
     }
+
     Object.values(schemaPart).forEach(adjustProps);
   }
 };
 
 const adjustSchema = (schema) => {
-  const obj = schema[schema.type];
+  const obj = schema?.[schema.type];
+
   if (obj) {
     delete obj.strict;
     delete obj.parameters?.$schema;
   }
+
   return adjustProps(schema);
 };
 
@@ -342,7 +373,10 @@ const transformConfig = (req, isV3) => {
 
   for (const key in req) {
     const matchedKey = fieldsMap[key];
-    if (matchedKey) cfg[matchedKey] = req[key];
+
+    if (matchedKey) {
+      cfg[matchedKey] = req[key];
+    }
   }
 
   if (req.response_format) {
@@ -385,9 +419,11 @@ const parseImg = async (url) => {
   if (url.startsWith("http://") || url.startsWith("https://")) {
     try {
       const response = await fetch(url);
+
       if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText} (${url})`);
       }
+
       mimeType = response.headers.get("content-type");
       data = Buffer.from(await response.arrayBuffer()).toString("base64");
     } catch (err) {
@@ -395,9 +431,11 @@ const parseImg = async (url) => {
     }
   } else {
     const match = url.match(/^data:(?<mimeType>.*?)(;base64)?,(?<data>.*)$/);
+
     if (!match) {
       throw new HttpError("Invalid image data: " + url, 400);
     }
+
     ({ mimeType, data } = match.groups);
   }
 
@@ -451,6 +489,69 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
 
 const thoughtSignatureCache = new Map();
 
+const THOUGHT_SIGNATURE_ID_MARKER = "_gts_";
+const FALLBACK_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+
+const base64UrlEncode = (str) => {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+
+  for (const b of bytes) {
+    binary += String.fromCharCode(b);
+  }
+
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+};
+
+const base64UrlDecode = (str) => {
+  try {
+    const base64 = str
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(str.length / 4) * 4, "=");
+
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch (err) {
+    console.error("Failed to decode thoughtSignature from tool_call_id:", err);
+    return undefined;
+  }
+};
+
+const makeToolCallId = (thoughtSignature) => {
+  const id = "call_" + generateId();
+
+  if (!thoughtSignature) {
+    return id;
+  }
+
+  return id + THOUGHT_SIGNATURE_ID_MARKER + base64UrlEncode(thoughtSignature);
+};
+
+const extractThoughtSignatureFromToolCallId = (id) => {
+  if (typeof id !== "string") {
+    return undefined;
+  }
+
+  const markerIndex = id.indexOf(THOUGHT_SIGNATURE_ID_MARKER);
+
+  if (markerIndex < 0) {
+    return undefined;
+  }
+
+  const encoded = id.slice(markerIndex + THOUGHT_SIGNATURE_ID_MARKER.length);
+
+  if (!encoded) {
+    return undefined;
+  }
+
+  return base64UrlDecode(encoded);
+};
+
 const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
   const calls = {};
 
@@ -471,7 +572,8 @@ const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
     const thoughtSignature =
       extra_content?.google?.thought_signature ??
       cachedSignatures?.get(id) ??
-      undefined;
+      extractThoughtSignatureFromToolCallId(id) ??
+      FALLBACK_THOUGHT_SIGNATURE;
 
     calls[id] = { i, name, thoughtSignature };
 
@@ -481,7 +583,7 @@ const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
         name,
         args,
       },
-      ...(thoughtSignature ? { thoughtSignature } : {}),
+      thoughtSignature,
     };
   });
 
@@ -498,6 +600,7 @@ const transformMsg = async ({ content, extra_content }) => {
       text: content,
       ...(thoughtSignature ? { thoughtSignature } : {}),
     });
+
     return parts;
   }
 
@@ -541,7 +644,9 @@ const transformMsg = async ({ content, extra_content }) => {
 };
 
 const transformMessages = async (messages) => {
-  if (!messages) return;
+  if (!messages) {
+    return;
+  }
 
   const contents = [];
   let system_instruction;
@@ -586,7 +691,10 @@ const transformMessages = async (messages) => {
 
       for (const tc of item.tool_calls) {
         const cached = thoughtSignatureCache.get(tc.id);
-        if (cached) sigMap.set(tc.id, cached);
+
+        if (cached) {
+          sigMap.set(tc.id, cached);
+        }
       }
 
       const fnParts = transformFnCalls(item, sigMap);
@@ -597,7 +705,7 @@ const transformMessages = async (messages) => {
   }
 
   if (system_instruction) {
-    if (!contents[0]?.parts.some(part => part.text)) {
+    if (!contents[0]?.parts?.some(part => part.text)) {
       contents.unshift({ role: "user", parts: [{ text: " " }] });
     }
   }
@@ -672,7 +780,7 @@ function transformCandidates(key, cand) {
       message.tool_calls ??= [];
 
       const thought_signature_for_call = part.thoughtSignature ?? fc.thoughtSignature;
-      const tool_id = fc.id ?? "call_" + generateId();
+      const tool_id = fc.id ?? makeToolCallId(thought_signature_for_call);
 
       if (thought_signature_for_call) {
         thoughtSignatureCache.set(tool_id, thought_signature_for_call);
@@ -723,7 +831,7 @@ function transformCandidates(key, cand) {
 
   return {
     index: cand.index ?? 0,
-    [key]: message,
+    message,
     logprobs: null,
     finish_reason: message.tool_calls
       ? "tool_calls"
@@ -759,7 +867,9 @@ const transformUsage = (data) => ({
 });
 
 const checkPromptBlock = (choices, promptFeedback, key) => {
-  if (choices.length) return;
+  if (choices.length) {
+    return;
+  }
 
   if (promptFeedback?.blockReason) {
     console.log("Prompt block reason:", promptFeedback.blockReason);
@@ -804,7 +914,10 @@ function parseStream(chunk, controller) {
 
   do {
     const match = this.buffer.match(responseLineRE);
-    if (!match) break;
+
+    if (!match) {
+      break;
+    }
 
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
