@@ -1,36 +1,38 @@
 import { Buffer } from "node:buffer";
 
 export default {
-  async fetch (request) {
-    if (request.method === "OPTIONS") {
-      return handleOPTIONS();
-    }
+  async fetch(request) {
+    if (request.method === "OPTIONS") return handleOPTIONS();
+
     const errHandler = (err) => {
       console.error(err);
       return new Response(err.message, fixCors({ status: err.status ?? 500 }));
     };
+
     try {
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
+      const { pathname } = new URL(request.url);
+
       const assert = (success) => {
         if (!success) {
           throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
         }
       };
-      const { pathname } = new URL(request.url);
+
       switch (true) {
         case pathname.endsWith("/chat/completions"):
           assert(request.method === "POST");
-          return handleCompletions(await request.json(), apiKey)
-            .catch(errHandler);
+          return handleCompletions(await request.json(), apiKey).catch(errHandler);
+
         case pathname.endsWith("/embeddings"):
           assert(request.method === "POST");
-          return handleEmbeddings(await request.json(), apiKey)
-            .catch(errHandler);
+          return handleEmbeddings(await request.json(), apiKey).catch(errHandler);
+
         case pathname.endsWith("/models"):
           assert(request.method === "GET");
-          return handleModels(apiKey)
-            .catch(errHandler);
+          return handleModels(apiKey).catch(errHandler);
+
         default:
           throw new HttpError("404 Not Found", 404);
       }
@@ -66,20 +68,21 @@ const handleOPTIONS = async () => {
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
+const API_CLIENT = "google-genai-sdk/1.34.0";
 
-// https://github.com/googleapis/js-genai/blob/main/src/_api_client.ts#L21
-const API_CLIENT = "google-genai-sdk/1.34.0"; // npm view @google/genai version
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
   ...(apiKey && { "x-goog-api-key": apiKey }),
   ...more
 });
 
-async function handleModels (apiKey) {
+async function handleModels(apiKey) {
   const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
+
   let { body } = response;
+
   if (response.ok) {
     const { models } = JSON.parse(await response.text());
     body = JSON.stringify({
@@ -92,41 +95,53 @@ async function handleModels (apiKey) {
       })),
     }, null, "  ");
   }
+
   return new Response(body, fixCors(response));
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "gemini-embedding-001";
-async function handleEmbeddings (req, apiKey) {
-  let modelFull, model;
+
+async function handleEmbeddings(req, apiKey) {
+  let modelFull;
+  let model;
+
   switch (true) {
     case typeof req.model !== "string":
       throw new HttpError("model is not specified", 400);
+
     case req.model.startsWith("models/"):
       modelFull = req.model;
       model = modelFull.substring(7);
       break;
+
     case req.model.startsWith("gemini-"):
       model = req.model;
       break;
+
     default:
       model = DEFAULT_EMBEDDINGS_MODEL;
   }
+
   modelFull ??= "models/" + model;
+
   if (!Array.isArray(req.input)) {
-    req.input = [ req.input ];
+    req.input = [req.input];
   }
+
   const response = await fetch(`${BASE_URL}/${API_VERSION}/${modelFull}:batchEmbedContents`, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify({
-      "requests": req.input.map(text => ({
+      requests: req.input.map(text => ({
         model: modelFull,
         content: { parts: { text } },
         outputDimensionality: req.dimensions,
       }))
     })
   });
+
   let { body } = response;
+
   if (response.ok) {
     const { embeddings } = JSON.parse(await response.text());
     body = JSON.stringify({
@@ -139,58 +154,70 @@ async function handleEmbeddings (req, apiKey) {
       model,
     }, null, "  ");
   }
+
   return new Response(body, fixCors(response));
 }
 
 const DEFAULT_MODEL = "gemini-flash-latest";
-async function handleCompletions (req, apiKey) {
+
+async function handleCompletions(req, apiKey) {
   let model = req.model;
+
   switch (true) {
     case typeof model !== "string":
       throw new HttpError("model is not specified", 400);
+
     case model.startsWith("models/"):
       model = model.substring(7);
       break;
+
     case model.startsWith("gemini-"):
     case model.startsWith("gemma-"):
       break;
+
     default:
       model = DEFAULT_MODEL;
   }
-  let isV3 = model.startsWith("gemini-3");
+
+  const isV3 = model.startsWith("gemini-3");
   let body = await transformRequest(req, isV3);
+
   const extra = req.extra_body?.google;
   if (extra) {
-    if (extra.safety_settings) {
-      body.safetySettings = extra.safety_settings;
-    }
-    if (extra.cached_content) {
-      body.cachedContent = extra.cached_content;
-    }
-    if (extra.thinking_config) {
-      body.generationConfig.thinkingConfig = extra.thinking_config;
-    }
+    if (extra.safety_settings) body.safetySettings = extra.safety_settings;
+    if (extra.cached_content) body.cachedContent = extra.cached_content;
+    if (extra.thinking_config) body.generationConfig.thinkingConfig = extra.thinking_config;
   }
+
   switch (true) {
     case model.endsWith(":search"):
-      model = model.slice(0,-7);
-      // eslint-disable-next-line no-fallthrough
+      model = model.slice(0, -7);
+      body.tools ??= [];
+      body.tools.push({ googleSearch: {} });
+      break;
+
     case req.model?.includes("-search-preview"):
       body.tools ??= [];
-      body.tools.push({googleSearch: {}});
+      body.tools.push({ googleSearch: {} });
+      break;
   }
+
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
-  if (req.stream) { url += "?alt=sse"; }
+  if (req.stream) url += "?alt=sse";
+
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
+
   body = response.body;
+
   if (response.ok) {
-    let id = "chatcmpl-" + generateId();
+    const id = "chatcmpl-" + generateId();
     const shared = {};
+
     if (req.stream) {
       body = response.body
         .pipeThrough(new TextDecoderStream())
@@ -204,28 +231,30 @@ async function handleCompletions (req, apiKey) {
           transform: toOpenAiStream,
           flush: toOpenAiStreamFlush,
           streamIncludeUsage: req.stream_options?.include_usage,
-          model, id, last: [],
+          model,
+          id,
+          last: [],
           shared,
         }))
         .pipeThrough(new TextEncoderStream());
     } else {
       body = await response.text();
+
       try {
         body = JSON.parse(body);
-        if (!body.candidates) {
-          throw new Error("Invalid completion object");
-        }
+        if (!body.candidates) throw new Error("Invalid completion object");
       } catch (err) {
         console.error("Error parsing response:", err);
         return new Response(body, fixCors(response));
       }
+
       body = processCompletionsResponse(body, model, id);
     }
   }
+
   return new Response(body, fixCors(response));
 }
 
-// Fields not supported by Gemini's function calling schema
 const UNSUPPORTED_SCHEMA_FIELDS = [
   "additionalProperties",
   "patternProperties",
@@ -247,9 +276,8 @@ const UNSUPPORTED_SCHEMA_FIELDS = [
 ];
 
 const adjustProps = (schemaPart) => {
-  if (typeof schemaPart !== "object" || schemaPart === null) {
-    return;
-  }
+  if (typeof schemaPart !== "object" || schemaPart === null) return;
+
   if (Array.isArray(schemaPart)) {
     schemaPart.forEach(adjustProps);
   } else {
@@ -262,8 +290,10 @@ const adjustProps = (schemaPart) => {
 
 const adjustSchema = (schema) => {
   const obj = schema[schema.type];
-  delete obj.strict;
-  delete obj.parameters?.$schema;
+  if (obj) {
+    delete obj.strict;
+    delete obj.parameters?.$schema;
+  }
   return adjustProps(schema);
 };
 
@@ -308,44 +338,50 @@ const thinkingLevelMap = {
 };
 
 const transformConfig = (req, isV3) => {
-  let cfg = {};
-  for (let key in req) {
+  const cfg = {};
+
+  for (const key in req) {
     const matchedKey = fieldsMap[key];
-    if (matchedKey) {
-      cfg[matchedKey] = req[key];
-    }
+    if (matchedKey) cfg[matchedKey] = req[key];
   }
+
   if (req.response_format) {
     switch (req.response_format.type) {
       case "json_schema":
         adjustSchema(req.response_format);
         cfg.responseSchema = req.response_format.json_schema?.schema;
+
         if (cfg.responseSchema && "enum" in cfg.responseSchema) {
           cfg.responseMimeType = "text/x.enum";
           break;
         }
-        // eslint-disable-next-line no-fallthrough
+
       case "json_object":
         cfg.responseMimeType = "application/json";
         break;
+
       case "text":
         cfg.responseMimeType = "text/plain";
         break;
+
       default:
         throw new HttpError("Unsupported response_format.type", 400);
     }
   }
+
   if (req.reasoning_effort) {
-    cfg.thinkingConfig =
-      isV3
-        ? { thinkingLevel: thinkingLevelMap[req.reasoning_effort] ?? req.reasoning_effort }
-        : { thinkingBudget: thinkingBudgetMap[req.reasoning_effort] };
+    cfg.thinkingConfig = isV3
+      ? { thinkingLevel: thinkingLevelMap[req.reasoning_effort] ?? req.reasoning_effort }
+      : { thinkingBudget: thinkingBudgetMap[req.reasoning_effort] };
   }
+
   return cfg;
 };
 
 const parseImg = async (url) => {
-  let mimeType, data;
+  let mimeType;
+  let data;
+
   if (url.startsWith("http://") || url.startsWith("https://")) {
     try {
       const response = await fetch(url);
@@ -364,6 +400,7 @@ const parseImg = async (url) => {
     }
     ({ mimeType, data } = match.groups);
   }
+
   return {
     inlineData: {
       mimeType,
@@ -376,25 +413,33 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   if (!parts.calls) {
     throw new HttpError("No function calls found in the previous message", 400);
   }
+
   let response;
+
   try {
     response = JSON.parse(content);
   } catch (err) {
     response = { result: content };
   }
+
   if (typeof response !== "object" || response === null || Array.isArray(response)) {
     response = { result: response };
   }
+
   if (!tool_call_id) {
     throw new HttpError("tool_call_id not specified", 400);
   }
+
   const { i, name } = parts.calls[tool_call_id] ?? {};
+
   if (!name) {
     throw new HttpError("Unknown tool_call_id: " + tool_call_id, 400);
   }
+
   if (parts[i]) {
     throw new HttpError("Duplicated tool_call_id: " + tool_call_id, 400);
   }
+
   parts[i] = {
     functionResponse: {
       id: tool_call_id.startsWith("call_") ? null : tool_call_id,
@@ -404,19 +449,18 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   };
 };
 
-// Cache: tool_call_id -> thoughtSignature, populated when we see assistant tool_calls
-// so that the next tool-result turn can attach it even if the client doesn't forward extra_content.
-// Note: In Cloudflare Workers this Map is only a best-effort in-memory fallback.
-// The most reliable path is for the client to preserve tool_calls[].extra_content.google.thought_signature.
 const thoughtSignatureCache = new Map();
 
 const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
   const calls = {};
+
   const parts = tool_calls.map(({ function: { arguments: argstr, name }, id, type, extra_content }, i) => {
     if (type !== "function") {
       throw new HttpError(`Unsupported tool_call type: "${type}"`, 400);
     }
+
     let args;
+
     try {
       args = JSON.parse(argstr);
     } catch (err) {
@@ -440,6 +484,7 @@ const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
       ...(thoughtSignature ? { thoughtSignature } : {}),
     };
   });
+
   parts.calls = calls;
   return parts;
 };
@@ -447,8 +492,12 @@ const transformFnCalls = ({ tool_calls }, cachedSignatures) => {
 const transformMsg = async ({ content, extra_content }) => {
   const thoughtSignature = extra_content?.google?.thought_signature;
   const parts = [];
+
   if (!Array.isArray(content)) {
-    parts.push({ text: content, ...(thoughtSignature ? { thoughtSignature } : {}) });
+    parts.push({
+      text: content,
+      ...(thoughtSignature ? { thoughtSignature } : {}),
+    });
     return parts;
   }
 
@@ -457,9 +506,11 @@ const transformMsg = async ({ content, extra_content }) => {
       case "text":
         parts.push({ text: item.text });
         break;
+
       case "image_url":
         parts.push(await parseImg(item.image_url.url));
         break;
+
       case "input_audio":
         parts.push({
           inlineData: {
@@ -468,6 +519,7 @@ const transformMsg = async ({ content, extra_content }) => {
           }
         });
         break;
+
       default:
         throw new HttpError(`Unknown "content" item type: "${item.type}"`, 400);
     }
@@ -477,18 +529,20 @@ const transformMsg = async ({ content, extra_content }) => {
     if (parts.length === 1) {
       parts[0].thoughtSignature = thoughtSignature;
     } else {
-      parts.push({ text:"", thoughtSignature });
+      parts.push({ text: "", thoughtSignature });
     }
   }
 
   if (content.every(item => item.type === "image_url")) {
     parts.push({ text: "" });
   }
+
   return parts;
 };
 
 const transformMessages = async (messages) => {
-  if (!messages) { return; }
+  if (!messages) return;
+
   const contents = [];
   let system_instruction;
 
@@ -497,35 +551,44 @@ const transformMessages = async (messages) => {
       case "system":
         system_instruction = { parts: await transformMsg(item) };
         continue;
-      case "tool":
-        // eslint-disable-next-line no-case-declarations
+
+      case "tool": {
         let { role, parts } = contents[contents.length - 1] ?? {};
+
         if (role !== "function") {
           const calls = parts?.calls;
           parts = [];
           parts.calls = calls;
+
           contents.push({
             role: "function",
-            parts
+            parts,
           });
         }
+
         transformFnResponse(item, parts);
         continue;
+      }
+
       case "assistant":
         item.role = "model";
         break;
+
       case "user":
         break;
+
       default:
         throw new HttpError(`Unknown message role: "${item.role}"`, 400);
     }
 
     if (item.tool_calls) {
       const sigMap = new Map();
+
       for (const tc of item.tool_calls) {
         const cached = thoughtSignatureCache.get(tc.id);
         if (cached) sigMap.set(tc.id, cached);
       }
+
       const fnParts = transformFnCalls(item, sigMap);
       contents.push({ role: item.role, parts: fnParts });
     } else {
@@ -543,30 +606,41 @@ const transformMessages = async (messages) => {
 };
 
 const transformTools = (req) => {
-  let tools, tool_config;
+  let tools;
+  let tool_config;
+
   if (req.tools) {
     const funcs = req.tools.filter(tool => tool.type === "function");
     funcs.forEach(adjustSchema);
-    tools = [{ function_declarations: funcs.map(schema => schema.function) }];
+
+    tools = [{
+      function_declarations: funcs.map(schema => schema.function),
+    }];
   }
+
   if (req.tool_choice) {
-    const allowed_function_names = req.tool_choice?.type === "function" ? [ req.tool_choice?.function?.name ] : undefined;
+    const allowed_function_names =
+      req.tool_choice?.type === "function"
+        ? [req.tool_choice?.function?.name]
+        : undefined;
+
     if (allowed_function_names || typeof req.tool_choice === "string") {
       tool_config = {
         function_calling_config: {
           mode: allowed_function_names ? "ANY" : req.tool_choice.toUpperCase(),
-          allowed_function_names
+          allowed_function_names,
         }
       };
     }
   }
+
   return { tools, tool_config };
 };
 
 const transformRequest = async (req, isV3) => ({
   ...await transformMessages(req.messages),
   safetySettings,
-  generationConfig: transformConfig(req,isV3),
+  generationConfig: transformConfig(req, isV3),
   ...transformTools(req),
 });
 
@@ -577,14 +651,19 @@ const generateId = () => {
 };
 
 const reasonsMap = {
-  "STOP": "stop",
-  "MAX_TOKENS": "length",
-  "SAFETY": "content_filter",
-  "RECITATION": "content_filter",
+  STOP: "stop",
+  MAX_TOKENS: "length",
+  SAFETY: "content_filter",
+  RECITATION: "content_filter",
 };
 
-function transformCandidates (key, cand) {
-  const message = { role: "assistant", content: [], reasoning_content: [] };
+function transformCandidates(key, cand) {
+  const message = {
+    role: "assistant",
+    content: [],
+    reasoning_content: [],
+  };
+
   let thought_signature;
 
   for (const part of cand.content?.parts ?? []) {
@@ -592,17 +671,11 @@ function transformCandidates (key, cand) {
       const fc = part.functionCall;
       message.tool_calls ??= [];
 
-      // Gemini returns thoughtSignature on the Part level:
-      // { functionCall: {...}, thoughtSignature: "..." }
-      // Keep fc.thoughtSignature as a compatibility fallback.
-      const fc_thought_signature = part.thoughtSignature ?? fc.thoughtSignature;
-
+      const thought_signature_for_call = part.thoughtSignature ?? fc.thoughtSignature;
       const tool_id = fc.id ?? "call_" + generateId();
 
-      // Cache thought_signature so the next tool-result turn can attach it
-      // even when the client doesn't forward extra_content.
-      if (fc_thought_signature) {
-        thoughtSignatureCache.set(tool_id, fc_thought_signature);
+      if (thought_signature_for_call) {
+        thoughtSignatureCache.set(tool_id, thought_signature_for_call);
       }
 
       message.tool_calls.push({
@@ -612,8 +685,8 @@ function transformCandidates (key, cand) {
           name: fc.name,
           arguments: JSON.stringify(fc.args ?? {}),
         },
-        extra_content: fc_thought_signature
-          ? { google: { thought_signature: fc_thought_signature } }
+        extra_content: thought_signature_for_call
+          ? { google: { thought_signature: thought_signature_for_call } }
           : undefined,
       });
     } else if (typeof part.text === "string") {
@@ -641,14 +714,20 @@ function transformCandidates (key, cand) {
   }
 
   if (thought_signature) {
-    message.extra_content = { google: { thought_signature } };
+    message.extra_content = {
+      google: {
+        thought_signature,
+      }
+    };
   }
 
   return {
     index: cand.index ?? 0,
-    message,
+    [key]: message,
     logprobs: null,
-    finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] ?? cand.finishReason,
+    finish_reason: message.tool_calls
+      ? "tool_calls"
+      : reasonsMap[cand.finishReason] ?? cand.finishReason,
   };
 }
 
@@ -657,7 +736,11 @@ const notEmpty = (el) => Object.values(el).some(Boolean) ? el : undefined;
 const sum = (...numbers) => numbers.reduce((total, num) => total + (num ?? 0), 0);
 
 const transformUsage = (data) => ({
-  completion_tokens: sum(data.candidatesTokenCount, data.toolUsePromptTokenCount, data.thoughtsTokenCount),
+  completion_tokens: sum(
+    data.candidatesTokenCount,
+    data.toolUsePromptTokenCount,
+    data.thoughtsTokenCount
+  ),
   prompt_tokens: data.promptTokenCount,
   total_tokens: data.totalTokenCount,
   completion_tokens_details: notEmpty({
@@ -671,25 +754,29 @@ const transformUsage = (data) => ({
       ?.find(el => el.modality === "AUDIO")
       ?.tokenCount,
     cached_tokens: data.cacheTokensDetails
-      ?.reduce((acc,el) => acc + el.tokenCount, 0),
+      ?.reduce((acc, el) => acc + el.tokenCount, 0),
   }),
 });
 
 const checkPromptBlock = (choices, promptFeedback, key) => {
-  if (choices.length) { return; }
+  if (choices.length) return;
+
   if (promptFeedback?.blockReason) {
     console.log("Prompt block reason:", promptFeedback.blockReason);
+
     if (promptFeedback.blockReason === "SAFETY") {
       promptFeedback.safetyRatings
         .filter(r => r.blocked)
         .forEach(r => console.log(r));
     }
+
     choices.push({
       index: 0,
-      null,
+      [key]: null,
       finish_reason: "content_filter",
     });
   }
+
   return true;
 };
 
@@ -697,30 +784,34 @@ const processCompletionsResponse = (data, model, id) => {
   const obj = {
     id: data.responseId ?? id,
     choices: data.candidates.map(transformCandidates.bind({}, "message")),
-    created: Math.floor(Date.now()/1000),
+    created: Math.floor(Date.now() / 1000),
     model: data.modelVersion ?? model,
     object: "chat.completion",
     usage: data.usageMetadata && transformUsage(data.usageMetadata),
   };
-  if (obj.choices.length === 0 ) {
+
+  if (obj.choices.length === 0) {
     checkPromptBlock(obj.choices, data.promptFeedback, "message");
   }
+
   return JSON.stringify(obj);
 };
 
 const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
 
-function parseStream (chunk, controller) {
+function parseStream(chunk, controller) {
   this.buffer += chunk;
+
   do {
     const match = this.buffer.match(responseLineRE);
-    if (!match) { break; }
+    if (!match) break;
+
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
   } while (true);
 }
 
-function parseStreamFlush (controller) {
+function parseStreamFlush(controller) {
   if (this.buffer) {
     console.error("Invalid data:", this.buffer);
     controller.enqueue(this.buffer);
@@ -731,25 +822,32 @@ function parseStreamFlush (controller) {
 const delimiter = "\n\n";
 
 const sseline = (obj) => {
-  obj.created = Math.floor(Date.now()/1000);
+  obj.created = Math.floor(Date.now() / 1000);
   return "data: " + JSON.stringify(obj) + delimiter;
 };
 
-function toOpenAiStream (line, controller) {
+function toOpenAiStream(line, controller) {
   let data;
+
   try {
     data = JSON.parse(line);
+
     if (!data.candidates) {
       throw new Error("Invalid completion chunk object");
     }
   } catch (err) {
     console.error("Error parsing response:", err);
-    if (!this.shared.is_buffers_rest) { line += delimiter; }
+
+    if (!this.shared.is_buffers_rest) {
+      line += delimiter;
+    }
+
     controller.enqueue(line);
     return;
   }
 
   let obj;
+
   try {
     obj = {
       id: data.responseId ?? this.id,
@@ -771,7 +869,11 @@ function toOpenAiStream (line, controller) {
     return;
   }
 
-  console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
+  console.assert(
+    data.candidates.length === 1,
+    "Unexpected candidates count: %d",
+    data.candidates.length
+  );
 
   const cand = obj.choices[0];
   cand.index ??= 0;
@@ -782,7 +884,14 @@ function toOpenAiStream (line, controller) {
   if (!this.last[cand.index]) {
     controller.enqueue(sseline({
       ...obj,
-      choices: [{ ...cand, tool_calls: undefined, delta: { role: "assistant", content: "" } }],
+      choices: [{
+        ...cand,
+        tool_calls: undefined,
+        delta: {
+          role: "assistant",
+          content: "",
+        }
+      }],
     }));
   }
 
@@ -802,11 +911,12 @@ function toOpenAiStream (line, controller) {
   this.last[cand.index] = obj;
 }
 
-function toOpenAiStreamFlush (controller) {
+function toOpenAiStreamFlush(controller) {
   if (this.last.length > 0) {
     for (const obj of this.last) {
       controller.enqueue(sseline(obj));
     }
+
     controller.enqueue("data: [DONE]" + delimiter);
   }
 }
